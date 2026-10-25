@@ -2,6 +2,15 @@
   'use strict';
   const KEY = 'studyflow-mobile-v1';
   const DRAFT_KEY = 'studyflow-form-draft-v1';
+  const OWNER_KEY = 'studyflow-cloud-owner-v1';
+  const LOCAL_UPDATED_KEY = 'studyflow-local-updated-at-v1';
+  const LOCAL_BACKUP_PREFIX = 'studyflow-local-backup-user-';
+  const UNLINKED_BACKUP_KEY = 'studyflow-unlinked-local-backup-v1';
+  const CLOUD_TABLE = 'studyflow_user_data';
+  let supabaseClient = null, currentUser = null, cloudReady = false, cloudDirty = false;
+  let cloudSyncBusy = false, cloudSyncTimer = null, cloudPollTimer = null, lastCloudUpdatedAt = 0;
+  let localRevision = 0, activatingUserId = '', authMode = window.location.hash.includes('type=recovery') ? 'recovery' : 'login';
+
   const COLORS = ['#958fbe','#83a9b5','#8caf9b','#d19b8d','#c5a56c','#8399bf','#b48fa4','#79a8a2'];
   const $ = s => document.querySelector(s);
   const $$ = s => [...document.querySelectorAll(s)];
@@ -43,7 +52,405 @@
       b.version=4;return b;
     }catch(e){setTimeout(()=>toast('本地数据读取失败，已恢复空白状态。','error'),50);return blank();}
   }
-  function save(){try{localStorage.setItem(KEY,JSON.stringify(state));}catch(e){toast('保存失败，请检查浏览器存储空间。','error');}}
+  function save(){
+    try{
+      localStorage.setItem(KEY,JSON.stringify(state));
+      localStorage.setItem(LOCAL_UPDATED_KEY,String(Date.now()));
+      localRevision += 1;
+      if(currentUser && cloudReady){
+        cloudDirty = true;
+        queueCloudSave();
+      }
+    }catch(e){toast('保存失败，请检查浏览器存储空间。','error');}
+  }
+
+  function normalizeState(input){
+    const b=blank();
+    if(!input || typeof input!=='object' || Array.isArray(input)) return b;
+    ['countdowns','subjects','projects','tasks','records','reviews','mockSeries','mockRecords'].forEach(k=>b[k]=Array.isArray(input[k])?input[k]:[]);
+    b.taskStates=input.taskStates&&typeof input.taskStates==='object'?input.taskStates:{};
+    if(input.journal&&typeof input.journal==='object'){
+      const j=input.journal;
+      b.journal={...b.journal,...j,
+        days:j.days&&typeof j.days==='object'?j.days:{},
+        events:Array.isArray(j.events)?j.events:[],
+        notes:Array.isArray(j.notes)?j.notes:[],
+        eventTypes:Array.isArray(j.eventTypes)&&j.eventTypes.length?j.eventTypes:defaultEventTypes(),
+        questions:Array.isArray(j.questions)&&j.questions.length?j.questions:defaultQuestions(),
+        answers:Array.isArray(j.answers)?j.answers:[]};
+    }
+    b.timer=input.timer&&['idle','running','paused'].includes(input.timer.status)?{...b.timer,...input.timer}:b.timer;
+    b.records=b.records.map(r=>{
+      const t=b.tasks.find(x=>x.id===r.taskId), s=b.subjects.find(x=>x.id===r.subjectId);
+      return {...r,taskTitle:r.taskTitle||t?.title||'',subjectName:r.subjectName||s?.name||'',subjectColor:r.subjectColor||s?.color||'#aaa'};
+    });
+    b.version=4;
+    return b;
+  }
+
+  function hasMeaningfulData(x){
+    if(!x || typeof x!=='object') return false;
+    const arrays=['countdowns','subjects','projects','tasks','records','reviews','mockSeries','mockRecords'];
+    if(arrays.some(k=>Array.isArray(x[k])&&x[k].length)) return true;
+    const j=x.journal||{};
+    return Object.keys(x.taskStates||{}).length>0 ||
+      Object.keys(j.days||{}).length>0 ||
+      ['events','notes','answers'].some(k=>Array.isArray(j[k])&&j[k].length>0) ||
+      !!(x.timer&&x.timer.status&&x.timer.status!=='idle');
+  }
+
+  function mergeById(localItems, cloudItems){
+    const merged=new Map();
+    (Array.isArray(localItems)?localItems:[]).forEach((item,i)=>{
+      const key=item&&item.id?String(item.id):'local-'+i;
+      merged.set(key,{...(merged.get(key)||{}),...item});
+    });
+    (Array.isArray(cloudItems)?cloudItems:[]).forEach((item,i)=>{
+      const key=item&&item.id?String(item.id):'cloud-'+i;
+      merged.set(key,{...(merged.get(key)||{}),...item});
+    });
+    return Array.from(merged.values());
+  }
+
+  function mergeStates(localInput, cloudInput){
+    const l=normalizeState(localInput), c=normalizeState(cloudInput);
+    const out={...l,...c};
+    ['countdowns','subjects','projects','tasks','records','reviews','mockSeries','mockRecords'].forEach(k=>out[k]=mergeById(l[k],c[k]));
+    out.taskStates={...l.taskStates,...c.taskStates};
+    const days={...l.journal.days};
+    Object.keys(c.journal.days||{}).forEach(day=>{days[day]={...(days[day]||{}),...(c.journal.days[day]||{})};});
+    out.journal={...l.journal,...c.journal,days,
+      events:mergeById(l.journal.events,c.journal.events),
+      notes:mergeById(l.journal.notes,c.journal.notes),
+      eventTypes:mergeById(l.journal.eventTypes,c.journal.eventTypes),
+      questions:mergeById(l.journal.questions,c.journal.questions),
+      answers:mergeById(l.journal.answers,c.journal.answers)};
+    out.timer=l.timer&&l.timer.status!=='idle'?l.timer:c.timer;
+    return normalizeState(out);
+  }
+
+  function persistLocalOnly(updatedAt){
+    try{
+      localStorage.setItem(KEY,JSON.stringify(state));
+      localStorage.setItem(LOCAL_UPDATED_KEY,String(updatedAt||Date.now()));
+    }catch(e){toast('本机数据保存失败，请导出备份。','error');}
+  }
+
+  function setSyncStatus(message,isError){
+    const header=$('#syncStatusHeader');
+    if(header){header.textContent=message;header.classList.toggle('error',!!isError);}
+    const detail=$('#syncStatusDetail');
+    if(detail) detail.textContent=message;
+  }
+
+  function setAuthGateVisible(visible){$('#authGate')?.classList.toggle('hidden',!visible);}
+  function setAuthMessage(message,type){
+    const el=$('#authMessage');
+    if(!el)return;
+    el.textContent=message||'';
+    el.className='auth-message'+(type?' '+type:'');
+  }
+
+  function setAuthMode(mode){
+    authMode=mode;
+    const tabs=$('#authTabs');
+    if(tabs)tabs.classList.toggle('hidden',mode==='recovery');
+    $('[data-auth-mode]').forEach(b=>b.classList.toggle('active',b.dataset.authMode===mode));
+    const label=$('#authPasswordLabel'), input=$('#authPassword'), submit=$('#authSubmit');
+    if(label)label.textContent=mode==='recovery'?'新密码':'密码';
+    if(input){input.autocomplete=mode==='recovery'?'new-password':mode==='signup'?'new-password':'current-password';input.value='';}
+    if(submit)submit.textContent=mode==='signup'?'创建账号':mode==='recovery'?'更新密码':'登录';
+    $('#resetPasswordBtn')?.classList.toggle('hidden',mode==='recovery');
+    setAuthMessage('', '');
+  }
+
+  function authErrorMessage(error){
+    const message=String(error&&error.message||error||'未知错误');
+    if(/invalid login credentials/i.test(message))return '邮箱或密码不正确，请检查后重试。';
+    if(/email not confirmed/i.test(message))return '邮箱尚未验证，请先打开验证邮件中的链接。';
+    if(/already registered|user already registered/i.test(message))return '这个邮箱已经注册，请切换到登录。';
+    if(/password.*(least|short|characters)/i.test(message))return '密码长度不符合要求，请至少使用 8 位密码。';
+    if(/row-level security|permission denied|policy/i.test(message))return '云端数据权限检查失败，请确认已执行 schema.sql。';
+    return message;
+  }
+
+  function queueCloudSave(){
+    if(!currentUser||!cloudReady)return;
+    clearTimeout(cloudSyncTimer);
+    setSyncStatus('有修改待同步',false);
+    cloudSyncTimer=setTimeout(()=>{pushCloudState();},900);
+  }
+
+  async function pushCloudState(){
+    if(!currentUser||!cloudReady||!supabaseClient)return false;
+    if(cloudSyncBusy){queueCloudSave();return false;}
+    if(!cloudDirty)return true;
+    clearTimeout(cloudSyncTimer);cloudSyncTimer=null;
+    cloudSyncBusy=true;
+    const revision=localRevision;
+    const snapshot=JSON.parse(JSON.stringify(state));
+    setSyncStatus('正在同步…',false);
+    let succeeded=false;
+    try{
+      const result=await supabaseClient.from(CLOUD_TABLE)
+        .upsert({user_id:currentUser.id,data:snapshot},{onConflict:'user_id'})
+        .select('updated_at').single();
+      if(result.error)throw result.error;
+      lastCloudUpdatedAt=Date.parse(result.data&&result.data.updated_at)||Date.now();
+      if(revision===localRevision){
+        cloudDirty=false;
+        localStorage.setItem(LOCAL_UPDATED_KEY,String(lastCloudUpdatedAt));
+        setSyncStatus('云端已同步',false);
+      }else{
+        cloudDirty=true;
+        setSyncStatus('有新修改，继续同步',false);
+      }
+      succeeded=true;
+    }catch(error){
+      cloudDirty=true;
+      setSyncStatus('同步失败（本机已保存）',true);
+      console.error('StudyFlow cloud sync failed:',error&&error.message||error);
+    }finally{
+      cloudSyncBusy=false;
+      if(succeeded&&cloudDirty)queueCloudSave();
+    }
+    return succeeded;
+  }
+
+  async function syncFromCloud(){
+    if(!currentUser||!cloudReady||!supabaseClient||cloudDirty||cloudSyncBusy)return;
+    try{
+      const result=await supabaseClient.from(CLOUD_TABLE).select('data,updated_at').eq('user_id',currentUser.id).maybeSingle();
+      if(result.error)throw result.error;
+      if(!result.data)return;
+      const serverTime=Date.parse(result.data.updated_at)||0;
+      if(serverTime>lastCloudUpdatedAt+500){
+        state=normalizeState(result.data.data);
+        lastCloudUpdatedAt=serverTime;
+        localStorage.setItem(OWNER_KEY,currentUser.id);
+        persistLocalOnly(serverTime);
+        render();
+        setSyncStatus('已从云端更新',false);
+      }
+    }catch(error){
+      setSyncStatus('暂时无法读取云端',true);
+      console.error('StudyFlow cloud refresh failed:',error&&error.message||error);
+    }
+  }
+
+  function exportUnlinkedBackup(){
+    try{
+      const raw=localStorage.getItem(UNLINKED_BACKUP_KEY);
+      if(!raw)return toast('没有可导出的本机备份。','error');
+      const blob=new Blob([raw],{type:'application/json'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='StudyFlow-local-backup.json';a.click();
+      URL.revokeObjectURL(a.href);
+      toast('本机备份已导出。');
+    }catch(e){toast('备份导出失败。','error');}
+  }
+
+  function backupLocalForOwner(owner,localState,updatedAt){
+    if(!owner||!hasMeaningfulData(localState))return;
+    try{localStorage.setItem(LOCAL_BACKUP_PREFIX+owner,JSON.stringify({state:localState,updatedAt:updatedAt||Date.now()}));}
+    catch(e){toast('旧账号本机备份失败，请先导出数据。','error');}
+  }
+
+  async function activateUser(user){
+    if(!user)return;
+    if(currentUser&&currentUser.id===user.id&&cloudReady){setAuthGateVisible(false);return;}
+    if(activatingUserId===user.id)return;
+    activatingUserId=user.id;
+    currentUser=user;
+    cloudReady=false;
+    cloudDirty=false;
+    setAuthGateVisible(true);
+    setAuthMessage('正在读取你的学习数据…','');
+    setSyncStatus('正在连接云端',false);
+    try{
+      const localNow=normalizeState(load());
+      const owner=localStorage.getItem(OWNER_KEY);
+      const localUpdated=Number(localStorage.getItem(LOCAL_UPDATED_KEY)||0);
+      let candidate=null, candidateKind='none', candidateUpdated=0;
+      if(owner===user.id){
+        candidate=localNow;candidateKind='owned';candidateUpdated=localUpdated;
+      }else if(!owner&&hasMeaningfulData(localNow)){
+        candidate=localNow;candidateKind='unlinked';candidateUpdated=localUpdated;
+      }else{
+        try{
+          const rawBackup=localStorage.getItem(LOCAL_BACKUP_PREFIX+user.id);
+          if(rawBackup){
+            const backup=JSON.parse(rawBackup);
+            if(backup&&backup.state){candidate=normalizeState(backup.state);candidateKind='backup';candidateUpdated=Number(backup.updatedAt||0);}
+          }
+        }catch(e){}
+      }
+      if(owner&&owner!==user.id)backupLocalForOwner(owner,localNow,localUpdated);
+
+      const result=await supabaseClient.from(CLOUD_TABLE).select('data,updated_at').eq('user_id',user.id).maybeSingle();
+      if(result.error)throw result.error;
+
+      if(result.data){
+        const remote=normalizeState(result.data.data);
+        lastCloudUpdatedAt=Date.parse(result.data.updated_at)||Date.now();
+        let chosen=remote;
+        if(candidate&&hasMeaningfulData(candidate)){
+          if(candidateKind==='owned'){
+            chosen=mergeStates(candidate,remote);
+          }else{
+            const merge=window.confirm('检测到本机也有学习数据。确定：将本机与云端数据合并（同一条记录冲突时以云端为准）；取消：使用云端数据，并保留本机数据备份。');
+            if(merge)chosen=mergeStates(candidate,remote);
+            else if(candidateKind==='unlinked'){
+              localStorage.setItem(UNLINKED_BACKUP_KEY,JSON.stringify({state:candidate,createdAt:new Date().toISOString()}));
+            }
+          }
+        }
+        state=normalizeState(chosen);
+        localStorage.setItem(OWNER_KEY,user.id);
+        persistLocalOnly(lastCloudUpdatedAt);
+        cloudReady=true;
+        render();
+        setAuthGateVisible(false);
+        const changed=JSON.stringify(state)!==JSON.stringify(remote);
+        if(changed){
+          cloudDirty=true;localRevision+=1;
+          await pushCloudState();
+        }else setSyncStatus('云端已同步',false);
+      }else{
+        if(candidate&&hasMeaningfulData(candidate)&&candidateKind!=='owned'){
+          const migrate=window.confirm('检测到本机已有学习数据。是否将这些数据迁移到当前账号的云端？确定：迁移并同步；取消：保持本机数据不变，并取消本次登录。');
+          if(!migrate){
+            setAuthMessage('已取消迁移，本机数据未更改。再次登录时可以重新选择。','');
+            await supabaseClient.auth.signOut();
+            return;
+          }
+        }
+        state=candidate&&hasMeaningfulData(candidate)?normalizeState(candidate):blank();
+        localStorage.setItem(OWNER_KEY,user.id);
+        persistLocalOnly(Date.now());
+        cloudReady=true;
+        cloudDirty=true;localRevision+=1;
+        render();
+        setAuthGateVisible(false);
+        await pushCloudState();
+        if(!cloudDirty)setSyncStatus('云端已同步',false);
+      }
+      if(!cloudPollTimer)cloudPollTimer=setInterval(()=>{syncFromCloud();},30000);
+    }catch(error){
+      cloudReady=false;
+      setSyncStatus('云端连接失败',true);
+      setAuthMessage('账号已登录，但读取云端数据失败：'+authErrorMessage(error)+'。请确认表和权限已配置，再刷新重试。','error');
+      console.error('StudyFlow cloud initialization failed:',error&&error.message||error);
+    }finally{
+      activatingUserId='';
+    }
+  }
+
+  function deactivateUser(){
+    currentUser=null;cloudReady=false;cloudDirty=false;
+    clearTimeout(cloudSyncTimer);cloudSyncTimer=null;
+    setAuthGateVisible(true);
+    setSyncStatus('未登录',false);
+    setAuthMessage('已退出登录。','');
+  }
+
+  async function signOutUser(){
+    if(!supabaseClient||!currentUser)return;
+    if(cloudDirty){
+      clearTimeout(cloudSyncTimer);
+      const ok=await pushCloudState();
+      if(!ok){
+        const proceed=window.confirm('部分数据尚未同步成功，但本机仍保留数据。仍要退出登录吗？');
+        if(!proceed)return;
+      }
+    }
+    const result=await supabaseClient.auth.signOut();
+    if(result.error)toast('退出登录失败：'+authErrorMessage(result.error),'error');
+    else $('#detailDialog').close();
+  }
+
+  async function initAuth(){
+    const url=window.STUDYFLOW_SUPABASE_URL;
+    const key=window.STUDYFLOW_SUPABASE_ANON_KEY;
+    if(!window.supabase||typeof window.supabase.createClient!=='function'){
+      $('#authConfigWarning').classList.remove('hidden');
+      setAuthMessage('Supabase 客户端加载失败，请检查网络后刷新。','error');
+      $('#authSubmit').disabled=true;
+      setSyncStatus('客户端未加载',true);
+      return;
+    }
+    if(!url||!key||/PASTE_|YOUR_SUPABASE|REPLACE_ME/i.test(key)){
+      $('#authConfigWarning').classList.remove('hidden');
+      setAuthMessage('完成 supabase-config.js 配置后即可注册或登录。','');
+      $('#authSubmit').disabled=true;
+      $('#resetPasswordBtn').disabled=true;
+      setSyncStatus('待配置',true);
+      return;
+    }
+    supabaseClient=window.supabase.createClient(url,key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+    supabaseClient.auth.onAuthStateChange((event,session)=>{
+      if(event==='SIGNED_OUT'){deactivateUser();return;}
+      if(event==='PASSWORD_RECOVERY'||window.location.hash.includes('type=recovery')){
+        setAuthMode('recovery');setAuthGateVisible(true);setAuthMessage('请设置一个新的登录密码。','');return;
+      }
+      if(event==='INITIAL_SESSION'&&!session){
+        setAuthGateVisible(true);setSyncStatus('未登录',false);
+        if(authMode!=='recovery')setAuthMode('login');
+        return;
+      }
+      if((event==='INITIAL_SESSION'||event==='SIGNED_IN')&&session&&session.user){
+        setTimeout(()=>activateUser(session.user),0);
+      }
+    });
+    setAuthMode(authMode);
+    if(authMode==='recovery')setAuthMessage('请设置一个新的登录密码。','');
+    $('#authForm').querySelectorAll('input').forEach(input=>input.disabled=false);
+    $('#authSubmit').disabled=false;
+    $('#resetPasswordBtn').disabled=false;
+  }
+
+  $('#authForm').addEventListener('submit',async e=>{
+    e.preventDefault();
+    if(!supabaseClient)return setAuthMessage('请先完成 Supabase 配置。','error');
+    const email=$('#authEmail').value.trim();
+    const password=$('#authPassword').value;
+    const button=$('#authSubmit');
+    button.disabled=true;
+    setAuthMessage(authMode==='signup'?'正在创建账号…':authMode==='recovery'?'正在更新密码…':'正在登录…','');
+    try{
+      if(authMode==='login'){
+        const result=await supabaseClient.auth.signInWithPassword({email,password});
+        if(result.error)throw result.error;
+        setAuthMessage('登录成功，正在读取你的数据…','success');
+      }else if(authMode==='signup'){
+        const result=await supabaseClient.auth.signUp({email,password,options:{emailRedirectTo:window.location.origin+window.location.pathname}});
+        if(result.error)throw result.error;
+        if(result.data&&result.data.session)setAuthMessage('注册成功，正在进入 StudyFlow…','success');
+        else setAuthMessage('注册成功！请打开邮箱中的验证链接，再回到此页面登录。','success');
+      }else{
+        const result=await supabaseClient.auth.updateUser({password});
+        if(result.error)throw result.error;
+        await supabaseClient.auth.signOut();
+        history.replaceState(null,document.title,window.location.pathname+window.location.search);
+        setAuthMode('login');
+        setAuthMessage('密码已更新，请使用新密码登录。','success');
+      }
+    }catch(error){setAuthMessage(authErrorMessage(error),'error');}
+    finally{button.disabled=false;}
+  });
+
+  $('#resetPasswordBtn').addEventListener('click',async()=>{
+    if(!supabaseClient)return setAuthMessage('请先完成 Supabase 配置。','error');
+    const email=$('#authEmail').value.trim();
+    if(!email)return setAuthMessage('请先填写邮箱，再点击忘记密码。','error');
+    $('#resetPasswordBtn').disabled=true;
+    try{
+      const result=await supabaseClient.auth.resetPasswordForEmail(email,{redirectTo:window.location.origin+window.location.pathname});
+      if(result.error)throw result.error;
+      setAuthMessage('如果该邮箱已注册，请查看收件箱中的密码重置邮件。','success');
+    }catch(error){setAuthMessage(authErrorMessage(error),'error');}
+    finally{$('#resetPasswordBtn').disabled=false;}
+  });
+
   const subject = id => state.subjects.find(x=>x.id===id);
   const task = id => state.tasks.find(x=>x.id===id);
   const project = id => state.projects.find(x=>x.id===id);
@@ -229,7 +636,17 @@
   function openJournalEventMenu(id){const x=state.journal.events.find(e=>e.id===id);if(!x)return;$('#detailContent').innerHTML=`<div class="sheet-head"><div><small>${fmtFullDate(x.date)} · ${x.time}</small><h2>${esc(eventType(x.typeId)?.name||'生活记录')}</h2></div><button class="icon-btn" data-detail-close>×</button></div><div class="detail-actions"><button class="secondary" data-edit-journal-event="${id}">编辑</button><button class="danger" data-delete-journal-event="${id}">删除</button></div>`;$('#detailDialog').showModal();}
   function openNoteMenu(id){const x=state.journal.notes.find(n=>n.id===id);if(!x)return;$('#detailContent').innerHTML=`<div class="sheet-head"><div><small>${fmtFullDate(x.date)} · ${x.time}</small><h2>随手记</h2></div><button class="icon-btn" data-detail-close>×</button></div><p style="white-space:pre-wrap;line-height:1.7">${esc(x.text)}</p><div class="detail-actions"><button class="secondary" data-edit-note="${id}">编辑</button><button class="danger" data-delete-note="${id}">删除</button></div>`;$('#detailDialog').showModal();}
   function manageSubjects(){const used=id=>state.tasks.some(t=>t.subjectId===id)||state.projects.some(p=>p.subjectId===id)||state.records.some(r=>r.subjectId===id)||state.reviews.some(r=>r.subjectId===id);$('#detailContent').innerHTML=`<div class="sheet-head"><div><small>SUBJECTS</small><h2>科目管理</h2></div><button class="icon-btn" data-detail-close>×</button></div><button class="primary full" data-add-subject>＋ 新增科目</button><div class="settings-list">${state.subjects.map(s=>`<div class="settings-row"><button data-edit-subject="${s.id}"><i class="dot" style="background:${s.color}"></i> <b>${esc(s.name)}</b>${used(s.id)?'<small> · 已有数据</small>':''}</button>${used(s.id)?'':`<button class="icon-btn" data-delete-subject="${s.id}" aria-label="删除科目">×</button>`}</div>`).join('')||'<p class="muted">还没有科目</p>'}</div>`;$('#detailDialog').showModal();}
-  function openSettings(){$('#detailContent').innerHTML=`<div class="sheet-head"><div><small>SETTINGS</small><h2>数据设置</h2></div><button class="icon-btn" data-detail-close>×</button></div><p class="muted">数据保存在当前浏览器，请定期导出备份。</p><div class="settings-list"><button data-action="export">导出备份</button><button data-action="import">导入备份</button><button data-action="clear-all" class="danger-text">清空全部数据</button></div>`;$('#detailDialog').showModal();}
+  function openSettings(){
+    const email=currentUser&&currentUser.email?esc(currentUser.email):'未登录';
+    const backupButton=localStorage.getItem(UNLINKED_BACKUP_KEY)?'<button data-action="export-unlinked-backup">导出未关联账号的本机备份</button>':'';
+    $('#detailContent').innerHTML='<div class="sheet-head"><div><small>ACCOUNT & SETTINGS</small><h2>账号与数据</h2></div><button class="icon-btn" data-detail-close>×</button></div>'+
+      '<p class="muted">当前账号：'+email+'</p>'+
+      '<p class="muted" id="syncStatusDetail">正在检查同步状态…</p>'+
+      '<div class="settings-list"><button data-action="export">导出 JSON 备份</button><button data-action="import">导入 JSON 备份</button>'+backupButton+'<button data-action="account-signout" class="danger-text">退出登录</button><button data-action="clear-all" class="danger-text">清空全部数据</button></div>'+
+      '<p class="muted">清空数据会同步到云端，并影响此账号的学习记录；操作前请先导出备份。</p>';
+    $('#detailDialog').showModal();
+    setSyncStatus(cloudReady?'云端已连接':currentUser?'正在连接云端':'未登录',false);
+  }
 
   function ask(title,text,fn,label='确认'){confirmCallback=fn;$('#confirmTitle').textContent=title;$('#confirmText').textContent=text;$('#confirmOk').textContent=label;$('#confirmDialog').showModal();}
   function toast(msg,type='') {const x=document.createElement('div');x.className=`toast ${type}`;x.textContent=msg;$('#toasts').append(x);setTimeout(()=>x.remove(),3000);}
@@ -238,8 +655,10 @@
   function exportData(){const blob=new Blob([JSON.stringify(state,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`StudyFlow-${today()}.json`;a.click();URL.revokeObjectURL(a.href);toast('备份文件已导出。');}
 
   document.addEventListener('click',e=>{
+    const authModeButton=e.target.closest('[data-auth-mode]');
+    if(authModeButton){setAuthMode(authModeButton.dataset.authMode);return;}
     const nav=e.target.closest('[data-nav]')?.dataset.nav;if(nav)go(nav);
-    const action=e.target.closest('[data-action]')?.dataset.action;if(action){if(action==='add-countdown')openForm('countdown');if(action==='add-task'){if(!state.subjects.length)return quickSubject('task');openForm('task');}if(action==='add-project'){if(!state.subjects.length)return quickSubject('project');openForm('project');}if(action==='add-record'){if(!state.subjects.length)return quickSubject('record');recordDate=view==='journal'?journalDate:(statsMode==='day'?statsAnchor:today());openForm('record');}if(action==='add-review'){if(!state.subjects.length)return quickSubject('review');openForm('review');}if(action==='add-mock-series')openForm('mockSeries');if(action==='add-mock-record'){if(!state.mockSeries.length)return openForm('mockSeries');openForm('mockRecord','',{seriesId:mockSeriesFilter});}if(action==='manage-subjects')manageSubjects();if(action==='quick-subject')quickSubject();if(action==='quick-project')quickProject();if(action==='settings')openSettings();if(action==='stats-today'){statsAnchor=today();renderStats();}if(action==='show-today-stats'){statsMode='day';statsAnchor=today();go('stats');}if(action==='show-overdue'){taskState='overdue';go('tasks');}if(action==='timer-focus')go('home');if(action==='timer-finish')finishTimer();if(action==='export')exportData();if(action==='import')$('#backupInput').click();if(action==='clear-all')ask('清空全部数据？','所有任务、项目、记录和复盘都会被删除，且无法撤销。',()=>{state=blank();save();$('#detailDialog').close();render();toast('全部数据已清空。');},'清空');}
+    const action=e.target.closest('[data-action]')?.dataset.action;if(action){if(action==='add-countdown')openForm('countdown');if(action==='add-task'){if(!state.subjects.length)return quickSubject('task');openForm('task');}if(action==='add-project'){if(!state.subjects.length)return quickSubject('project');openForm('project');}if(action==='add-record'){if(!state.subjects.length)return quickSubject('record');recordDate=view==='journal'?journalDate:(statsMode==='day'?statsAnchor:today());openForm('record');}if(action==='add-review'){if(!state.subjects.length)return quickSubject('review');openForm('review');}if(action==='add-mock-series')openForm('mockSeries');if(action==='add-mock-record'){if(!state.mockSeries.length)return openForm('mockSeries');openForm('mockRecord','',{seriesId:mockSeriesFilter});}if(action==='manage-subjects')manageSubjects();if(action==='quick-subject')quickSubject();if(action==='quick-project')quickProject();if(action==='settings'||action==='account')openSettings();if(action==='account-signout')signOutUser();if(action==='export-unlinked-backup')exportUnlinkedBackup();if(action==='stats-today'){statsAnchor=today();renderStats();}if(action==='show-today-stats'){statsMode='day';statsAnchor=today();go('stats');}if(action==='show-overdue'){taskState='overdue';go('tasks');}if(action==='timer-focus')go('home');if(action==='timer-finish')finishTimer();if(action==='export')exportData();if(action==='import')$('#backupInput').click();if(action==='clear-all')ask('清空全部数据？','所有任务、项目、记录和复盘都会被删除，且无法撤销。',()=>{state=blank();save();$('#detailDialog').close();render();toast('全部数据已清空。');},'清空');}
     if(action==='add-subject')openForm('subject');if(action==='add-note')openForm('journalNote','',{date:journalDate});if(action==='add-event-type')openForm('eventType');if(action==='add-question')openForm('question');if(action==='journal-today'){journalDate=today();renderJournal();}
     const tm=e.target.closest('[data-task-main]')?.dataset.taskMain;if(tm){taskMain=tm;renderTasks();}const ts=e.target.closest('[data-task-state]')?.dataset.taskState;if(ts){taskState=ts;renderTasks();}const ps=e.target.closest('[data-project-state]')?.dataset.projectState;if(ps){projectState=ps;renderTasks();}const sf=e.target.closest('[data-subject-filter]');if(sf){subjectFilter=sf.dataset.subjectFilter;renderTasks();}const mf=e.target.closest('[data-mock-series-filter]');if(mf){mockSeriesFilter=mf.dataset.mockSeriesFilter;renderTasks();}
     const rv=e.target.closest('[data-review-view]')?.dataset.reviewView;if(rv){reviewView=rv;renderReviews();}const am=e.target.closest('[data-archive-mode]')?.dataset.archiveMode;if(am){reviewArchiveMode=am;renderReviews();}const rf=e.target.closest('[data-review-folder]');if(rf){reviewView='recent';reviewLimit=20;if(rf.dataset.reviewFolder==='subject'){reviewSubject=rf.dataset.folderValue;reviewMonth='';}else{reviewMonth=rf.dataset.folderValue;reviewSubject='';}renderReviews();}if(e.target.closest('#reviewMore')){reviewLimit+=20;renderReviews();}
@@ -275,4 +694,6 @@
   window.addEventListener('storage',e=>{if(e.key===KEY){state=load();render();toast('数据已从另一个页面同步。');}});document.addEventListener('visibilitychange',()=>{if(!document.hidden)updateTimer();});
   tick=setInterval(()=>{if(state.timer.status==='running')updateTimer();},1000);
   render();if(state.timer.status!=='idle')toast(state.timer.status==='running'?'已恢复运行中的计时。':'已恢复暂停中的计时。');
+  initAuth();
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){updateTimer();syncFromCloud();}});
 })();
