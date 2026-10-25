@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f4f0e7">
   <title>StudyFlow</title>
-  <link rel="stylesheet" href="styles.css?v=20261025-2">
+  <link rel="stylesheet" href="styles.css?v=20261025-4">
 </head>
 <body>
   <div class="phone-app">
@@ -27,18 +27,22 @@
       </section>
       <section class="page" data-page="tasks">
         <div class="page-title"><div><span>PROGRESS</span><h1>进度管理</h1></div><button class="primary small" id="taskPageAdd">＋ 任务</button></div>
-        <div class="tabs four-tabs" id="taskMainTabs"><button class="active" data-task-main="tasks">任务</button><button data-task-main="projects">项目</button><button data-task-main="subjects">科目</button><button data-task-main="mocks">模考</button></div>
+        <div class="tabs three-tabs" id="taskMainTabs"><button class="active" data-task-main="tasks">任务</button><button data-task-main="projects">项目</button><button data-task-main="subjects">科目</button></div>
         <div id="taskPane"><div class="filter-row" id="subjectFilters"></div><div class="sub-tabs" id="taskStateTabs"><button class="active" data-task-state="today">今天</button><button data-task-state="overdue">历史未完成</button><button data-task-state="completed">已完成</button></div><div id="taskList" class="task-list roomy"></div></div>
         <div id="projectPane" class="hidden"><div class="sub-tabs" id="projectStateTabs"><button class="active" data-project-state="active">进行中</button><button data-project-state="ended">已结束</button></div><div id="projectList" class="project-list"></div></div>
         <div id="subjectPane" class="hidden"><div id="subjectList" class="subject-list"></div></div>
-        <div id="mockPane" class="hidden"><div id="mockSeriesFilters" class="filter-row"></div><div id="mockContent"></div></div>
       </section>
       <section class="page" data-page="reviews">
-        <div class="page-title"><div><span>REVIEW</span><h1>复盘</h1></div><button class="primary small" data-action="add-review">＋ 复盘</button></div>
-        <div class="tabs three-tabs" id="reviewTabs"><button class="active" data-review-view="recent">最近</button><button data-review-view="archive">档案柜</button><button data-review-view="tags">错误标签</button></div>
-        <div id="reviewRecent"><input id="reviewSearch" class="search-input" placeholder="搜索标题、内容或标签"><div class="review-filters"><select id="reviewSubjectFilter"><option value="">全部科目</option></select><select id="reviewTagFilter"><option value="">全部标签</option></select></div><div id="reviewList" class="review-list"></div><button id="reviewMore" class="secondary full hidden">加载更多</button></div>
-        <div id="reviewArchive" class="hidden"><div class="sub-tabs"><button class="active" data-archive-mode="subject">按科目</button><button data-archive-mode="time">按时间</button></div><div id="archiveList" class="folder-list"></div></div>
-        <div id="reviewTags" class="hidden"><section class="card compact"><div class="section-title"><h2>错误原因统计</h2></div><div id="tagStats" class="tag-stats"></div><p id="tagAdvice" class="advice"></p></section></div>
+        <div class="page-title"><div><span>REVIEW</span><h1>复盘</h1></div><button class="primary small" id="reviewPageAdd">＋ 复盘</button></div>
+        <div class="tabs three-tabs" id="reviewMainTabs"><button class="active" data-review-main="reviews">复盘记录</button><button data-review-main="notes">学习笔记</button><button data-review-main="mocks">模考</button></div>
+        <div id="reviewPane">
+          <div class="sub-tabs roomy review-sub-tabs" id="reviewTabs"><button class="active" data-review-view="recent">最近</button><button data-review-view="archive">档案柜</button><button data-review-view="tags">错误标签</button></div>
+          <div id="reviewRecent"><input id="reviewSearch" class="search-input" placeholder="搜索标题、内容或标签"><div class="review-filters"><select id="reviewSubjectFilter"><option value="">全部科目</option></select><select id="reviewTagFilter"><option value="">全部标签</option></select></div><div id="reviewList" class="review-list"></div><button id="reviewMore" class="secondary full hidden">加载更多</button></div>
+          <div id="reviewArchive" class="hidden"><div class="sub-tabs"><button class="active" data-archive-mode="subject">按科目</button><button data-archive-mode="time">按时间</button></div><div id="archiveList" class="folder-list"></div></div>
+          <div id="reviewTags" class="hidden"><section class="card compact"><div class="section-title"><h2>错误原因统计</h2></div><div id="tagStats" class="tag-stats"></div><p id="tagAdvice" class="advice"></p></section></div>
+        </div>
+        <div id="studyNotePane" class="hidden"><input id="studyNoteSearch" class="search-input" placeholder="搜索笔记标题或内容"><div class="review-filters"><select id="studyNoteSubjectFilter"><option value="">全部科目</option></select><div class="note-storage-hint">图片仅保存在当前浏览器</div></div><div id="studyNoteList" class="study-note-list"></div></div>
+        <div id="mockPane" class="hidden"><div id="mockSeriesFilters" class="filter-row"></div><div id="mockContent"></div></div>
       </section>
       <section class="page" data-page="journal">
         <div class="page-title"><div><span>JOURNAL</span><h1>日记</h1></div><button class="primary small" data-action="add-note">＋ 随手记</button></div>
@@ -59,6 +63,6 @@
   <dialog id="formDialog" class="sheet"><form id="entityForm" novalidate><div class="sheet-head"><div><small id="formKicker"></small><h2 id="formTitle"></h2></div><button type="button" class="icon-btn" data-close>×</button></div><div id="formFields" class="form-fields"></div><p id="formError" class="form-error"></p><button class="primary full" type="submit" id="formSubmit">保存</button></form></dialog>
   <dialog id="detailDialog" class="sheet"><div id="detailContent"></div></dialog>
   <dialog id="confirmDialog" class="confirm-dialog"><form method="dialog"><div class="warn">!</div><h2 id="confirmTitle"></h2><p id="confirmText"></p><div class="confirm-actions"><button value="cancel" class="secondary">取消</button><button value="ok" class="danger" id="confirmOk">确认</button></div></form></dialog>
-  <input type="file" id="backupInput" accept="application/json" hidden><div id="toasts" class="toasts" aria-live="polite"></div><script src="app.js?v=20261025-2"></script>
+  <input type="file" id="backupInput" accept="application/json" hidden><div id="toasts" class="toasts" aria-live="polite"></div><script src="app.js?v=20261025-4"></script>
 </body>
 </html>
