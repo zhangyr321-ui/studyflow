@@ -155,8 +155,11 @@
     authMode=mode;
     const tabs=$('#authTabs');
     if(tabs)tabs.classList.toggle('hidden',mode==='recovery');
-    $('[data-auth-mode]').forEach(b=>b.classList.toggle('active',b.dataset.authMode===mode));
+    document.querySelectorAll('[data-auth-mode]').forEach(b=>b.classList.toggle('active',b.dataset.authMode===mode));
     const label=$('#authPasswordLabel'), input=$('#authPassword'), submit=$('#authSubmit');
+    const emailField=$('#authEmail')?.closest('.auth-field');
+    if(emailField)emailField.classList.toggle('hidden',mode==='recovery');
+    $('#authEmail').required=mode!=='recovery';
     if(label)label.textContent=mode==='recovery'?'新密码':'密码';
     if(input){input.autocomplete=mode==='recovery'?'new-password':mode==='signup'?'new-password':'current-password';input.value='';}
     if(submit)submit.textContent=mode==='signup'?'创建账号':mode==='recovery'?'更新密码':'登录';
