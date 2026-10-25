@@ -691,9 +691,8 @@
   $('#journalTodayContent').addEventListener('change',e=>{const questionId=e.target.dataset.questionAnswer;if(questionId){const value=e.target.value.trim(),old=journalAnswer(questionId,journalDate),payload={questionId,date:journalDate,value,skipped:false};if(old)Object.assign(old,payload);else state.journal.answers.push({...payload,id:uid('answer')});save();toast('回答已自动保存。');return;}const key=e.target.dataset.journalInput;if(!key)return;let value=e.target.value;if(key==='keywords')value=value.split(/[，,]/).map(x=>x.trim()).filter(Boolean).slice(0,3).join('，');if(key==='sleepHours')value=Math.max(0,Math.min(24,+value||0));if(key==='sleepMinutes')value=Math.max(0,Math.min(59,+value||0));updateJournalDay(journalDate,{[key]:value});});
   $('#confirmDialog').addEventListener('close',()=>{if($('#confirmDialog').returnValue==='ok'&&confirmCallback)confirmCallback();confirmCallback=null;});
   $('#backupInput').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;try{const x=JSON.parse(await f.text());if(!x||!Array.isArray(x.tasks)||!Array.isArray(x.records))throw Error();localStorage.setItem(KEY,JSON.stringify(x));state=load();save();$('#detailDialog').close();render();toast('备份已导入。');}catch(err){toast('备份文件无法读取。','error');}e.target.value='';});
-  window.addEventListener('storage',e=>{if(e.key===KEY){state=load();render();toast('数据已从另一个页面同步。');}});document.addEventListener('visibilitychange',()=>{if(!document.hidden)updateTimer();});
+  window.addEventListener('storage',e=>{if(e.key===KEY){state=load();render();toast('数据已从另一个页面同步。');}});document.addEventListener('visibilitychange',()=>{if(!document.hidden){updateTimer();syncFromCloud();}});
   tick=setInterval(()=>{if(state.timer.status==='running')updateTimer();},1000);
   render();if(state.timer.status!=='idle')toast(state.timer.status==='running'?'已恢复运行中的计时。':'已恢复暂停中的计时。');
   initAuth();
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden){updateTimer();syncFromCloud();}});
 })();
