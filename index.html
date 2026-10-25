@@ -8,10 +8,29 @@
   <link rel="stylesheet" href="styles.css?v=20261025-1">
 </head>
 <body>
+  <section id="authGate" class="auth-gate" aria-labelledby="authTitle">
+    <div class="auth-card">
+      <div class="auth-brand"><span class="brand-logo">S</span><div><strong id="authTitle">StudyFlow</strong><small>让每一次学习，都有迹可循</small></div></div>
+      <p class="auth-intro">登录账号，在不同设备继续你的学习计划。</p>
+      <div id="authConfigWarning" class="auth-config-warning hidden" role="alert">还需要配置 Supabase 公开密钥。请打开开发分支中的 <a href="https://github.com/zhangyr321-ui/studyflow/blob/feature/auth-cloud-sync/supabase-config.js" target="_blank" rel="noopener">supabase-config.js</a>，将占位文本替换为 Supabase 控制台的 Publishable key（或旧版 anon key）。不要使用 service_role 或 secret key。</div>
+      <div id="authTabs" class="auth-tabs">
+        <button type="button" class="active" data-auth-mode="login">登录</button>
+        <button type="button" data-auth-mode="signup">注册账号</button>
+      </div>
+      <form id="authForm">
+        <label class="auth-field"><span>邮箱</span><input id="authEmail" type="email" name="email" autocomplete="email" placeholder="name@example.com" required></label>
+        <label class="auth-field"><span id="authPasswordLabel">密码</span><input id="authPassword" type="password" name="password" autocomplete="current-password" minlength="8" placeholder="至少 8 位" required></label>
+        <p id="authMessage" class="auth-message" role="status" aria-live="polite"></p>
+        <button type="submit" id="authSubmit" class="primary full">登录</button>
+      </form>
+      <button type="button" id="resetPasswordBtn" class="text-btn reset-password-btn">忘记密码？</button>
+      <p class="auth-foot">你的学习数据会按账号隔离，并保存到云端。请勿在不信任的设备上保持登录。</p>
+    </div>
+  </section>
   <div class="phone-app">
     <header class="app-header">
-      <div class="brand"><span class="brand-logo">S</span><div><b>StudyFlow</b><small id="headerDate"></small></div></div>
-      <button class="icon-btn" data-action="settings" aria-label="设置">⋯</button>
+      <div class="brand"><span class="brand-logo">S</span><div><b>StudyFlow</b><small id="headerDate"></small><small id="syncStatusHeader" class="sync-status-header">检查登录状态…</small></div></div>
+      <div class="header-actions"><button class="icon-btn" data-action="account" aria-label="账号">◎</button><button class="icon-btn" data-action="settings" aria-label="设置">⋯</button></div>
     </header>
     <main>
       <section class="page active" data-page="home">
@@ -59,6 +78,9 @@
   <dialog id="formDialog" class="sheet"><form id="entityForm" novalidate><div class="sheet-head"><div><small id="formKicker"></small><h2 id="formTitle"></h2></div><button type="button" class="icon-btn" data-close>×</button></div><div id="formFields" class="form-fields"></div><p id="formError" class="form-error"></p><button class="primary full" type="submit" id="formSubmit">保存</button></form></dialog>
   <dialog id="detailDialog" class="sheet"><div id="detailContent"></div></dialog>
   <dialog id="confirmDialog" class="confirm-dialog"><form method="dialog"><div class="warn">!</div><h2 id="confirmTitle"></h2><p id="confirmText"></p><div class="confirm-actions"><button value="cancel" class="secondary">取消</button><button value="ok" class="danger" id="confirmOk">确认</button></div></form></dialog>
-  <input type="file" id="backupInput" accept="application/json" hidden><div id="toasts" class="toasts" aria-live="polite"></div><script src="app.js?v=20261025-1"></script>
+  <input type="file" id="backupInput" accept="application/json" hidden><div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase-config.js?v=20261025-1"></script>
+  <script src="app.js?v=20261025-2"></script>
 </body>
 </html>
